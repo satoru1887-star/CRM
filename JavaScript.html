@@ -1,0 +1,1135 @@
+<script>
+  /* ============ Global state ============ */
+  let CONSTANTS = {};
+  let CUSTOMERS = [];
+  let DEALS = [];
+  let CURRENT_VIEW = 'home';
+  let CURRENT_CUSTOMER_ID = null;
+  const POLICY_CACHE = { life: [], car: [], fire: [], travel: [], other: [] };
+  let SERVICE_CACHE = [];
+  let CUSTOMER_FAMILY_FILTER = null; // null = แสดงทุกครอบครัว, มิฉะนั้นคือชื่อครอบครัวที่เลือกกรอง
+  let HOME_FOLLOWUPS = []; // รายการนัดหมาย/ติดตามที่แสดงในหน้าแรก (จาก getHomeSummary)
+
+  const STAGE_COLORS = ['#5B6B65', '#D9A855', '#C08A2E', '#6B8A5B', '#4C6B3F'];
+
+  const VIEW_META = {
+    home: { title: 'หน้าแรก', desc: 'สรุปงานประจำวันของตัวแทน' },
+    customers: { title: 'ลูกค้า', desc: 'แฟ้มข้อมูลลูกค้าทั้งหมด' },
+    customerDetail: { title: 'แฟ้มข้อมูลลูกค้า', desc: '' },
+    deals: { title: 'ดีล', desc: 'ระบบติดตามลูกค้า' }
+  };
+
+  const TAB_LABELS = {
+    life: 'ชีวิต/สุขภาพ/โรคร้ายแรง', car: 'ประกันรถยนต์', fire: 'ประกันอัคคีภัยบ้าน',
+    travel: 'ประกันเดินทาง', other: 'สินค้าอื่นๆ'
+  };
+
+  document.addEventListener('DOMContentLoaded', init);
+
+  function init() {
+    bindStaticEvents();
+    google.script.run.withSuccessHandler(function (c) {
+      CONSTANTS = c;
+      loadAllAndRender();
+    }).withFailureHandler(showError).getConstants();
+  }
+
+  function loadAllAndRender() {
+    google.script.run.withSuccessHandler(function (customers) {
+      CUSTOMERS = customers;
+      google.script.run.withSuccessHandler(function (deals) {
+        DEALS = deals;
+        document.getElementById('loading').classList.add('hidden');
+        switchView('home');
+      }).withFailureHandler(showError).getDeals();
+    }).withFailureHandler(showError).getCustomers();
+  }
+
+  function reloadCustomers(cb) {
+    // ดึงข้อมูลลูกค้าจาก Firestore Collection 'customers'
+db.collection('customers').get().then((querySnapshot) => {
+  CUSTOMERS = [];
+  querySnapshot.forEach((doc) => {
+    CUSTOMERS.push({ id: doc.id, ...doc.data() });
+  });
+  renderCustomersList();
+}).catch((error) => {
+  showError(error);
+});
+
+  function reloadDeals(cb) {
+    google.script.run.withSuccessHandler(function (deals) {
+      DEALS = deals;
+      if (cb) cb();
+    }).withFailureHandler(showError).getDeals();
+  }
+
+  /* ============ Navigation ============ */
+  function switchView(view) {
+    CURRENT_VIEW = view;
+    const navKey = view === 'customerDetail' ? 'customers' : view;
+    document.querySelectorAll('.navlink').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.view === navKey);
+    });
+    document.querySelectorAll('.view').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.viewPanel === view);
+    });
+    if (view !== 'customerDetail') {
+      document.getElementById('pageTitle').textContent = VIEW_META[view].title;
+      document.getElementById('pageDesc').textContent = VIEW_META[view].desc;
+    }
+    renderHeadActions(view);
+    renderCurrentView();
+  }
+
+  function renderCurrentView() {
+    if (CURRENT_VIEW === 'home') renderHome();
+    else if (CURRENT_VIEW === 'customers') renderCustomersList();
+    else if (CURRENT_VIEW === 'deals') renderDealsBoard();
+  }
+
+  function renderHeadActions(view) {
+    const box = document.getElementById('headActions');
+    box.innerHTML = '';
+    if (view === 'home') {
+      const exportBtn = document.createElement('button');
+      exportBtn.className = 'btn-secondary';
+      exportBtn.id = 'btnExport';
+      exportBtn.textContent = 'ดาวน์โหลดรายงาน (Excel)';
+      exportBtn.addEventListener('click', onExportExcel);
+      box.appendChild(exportBtn);
+    } else if (view === 'customers') {
+      const addBtn = document.createElement('button');
+      addBtn.className = 'btn-primary';
+      addBtn.textContent = 'เพิ่มลูกค้าใหม่';
+      addBtn.addEventListener('click', openAddCustomerModal);
+      box.appendChild(addBtn);
+    } else if (view === 'deals') {
+      const search = document.createElement('input');
+      search.type = 'text'; search.id = 'searchBox'; search.placeholder = 'ค้นหาลูกค้า / ผลิตภัณฑ์...';
+      search.addEventListener('input', renderDealsBoard);
+      const addBtn = document.createElement('button');
+      addBtn.className = 'btn-primary';
+      addBtn.textContent = 'เพิ่มดีลใหม่';
+      addBtn.addEventListener('click', openAddDealModal);
+      box.appendChild(search);
+      box.appendChild(addBtn);
+    }
+  }
+
+  function bindStaticEvents() {
+    document.querySelectorAll('.navlink').forEach(function (el) {
+      el.addEventListener('click', function () { switchView(el.dataset.view); });
+    });
+    document.getElementById('backToCustomers').addEventListener('click', function () { switchView('customers'); });
+
+    document.getElementById('btnFamilyFilter').addEventListener('click', function (e) {
+      e.stopPropagation();
+      toggleFamilyFilterMenu();
+    });
+    document.addEventListener('click', function (e) {
+      const wrap = document.getElementById('familyFilterWrap');
+      if (!wrap.contains(e.target)) closeFamilyFilterMenu();
+    });
+
+    document.querySelectorAll('#customerTabs .tab-btn').forEach(function (el) {
+      el.addEventListener('click', function () { switchCustomerTab(el.dataset.tab); });
+    });
+
+    document.querySelectorAll('.btn-add-record').forEach(function (el) {
+      el.addEventListener('click', function () { openRecordModal(el.dataset.category, null); });
+    });
+
+    // ลูกค้า modal
+    document.getElementById('custBtnCancel').addEventListener('click', function () { closeModal('customerModalOverlay'); });
+    document.getElementById('customerForm').addEventListener('submit', onSubmitCustomer);
+    document.getElementById('custBtnDelete').addEventListener('click', onDeleteCustomer);
+    document.getElementById('btnEditCustomer').addEventListener('click', function () { openEditCustomerModal(getCurrentCustomer()); });
+    document.getElementById('btnDeleteCustomer').addEventListener('click', function () {
+      document.getElementById('custId').value = CURRENT_CUSTOMER_ID;
+      onDeleteCustomer();
+    });
+
+    // record modal (กรมธรรม์)
+    document.getElementById('recBtnCancel').addEventListener('click', function () { closeModal('recordModalOverlay'); });
+    document.getElementById('recordForm').addEventListener('submit', onSubmitRecord);
+    document.getElementById('recBtnDelete').addEventListener('click', onDeleteRecord);
+
+    // service modal
+    document.getElementById('btnAddService').addEventListener('click', function () { openServiceModal(); });
+    document.getElementById('svcBtnCancel').addEventListener('click', function () { closeModal('serviceModalOverlay'); });
+    document.getElementById('serviceForm').addEventListener('submit', onSubmitService);
+    document.getElementById('svcBtnDelete').addEventListener('click', onDeleteService);
+
+    // deal modal
+    document.getElementById('dealBtnCancel').addEventListener('click', function () { closeModal('dealModalOverlay'); });
+    document.getElementById('dealForm').addEventListener('submit', onSubmitDeal);
+    document.getElementById('dealBtnDelete').addEventListener('click', onDeleteDeal);
+    document.getElementById('dealProduct').addEventListener('change', function () { toggleCustomInput('dealProduct', 'dealProductCustom'); });
+
+    // นัดหมาย modal (ไม่ผูกกับดีล)
+    document.getElementById('btnAddFollowUp').addEventListener('click', openAddAppointmentModal);
+    document.getElementById('apptBtnCancel').addEventListener('click', function () { closeModal('appointmentModalOverlay'); });
+    document.getElementById('appointmentForm').addEventListener('submit', onSubmitAppointment);
+    document.getElementById('apptBtnDelete').addEventListener('click', onDeleteAppointment);
+
+    // เป้าหมายยอดขาย
+    document.getElementById('btnEditTarget').addEventListener('click', openTargetModal);
+    document.getElementById('targetBtnCancel').addEventListener('click', function () { closeModal('targetModalOverlay'); });
+    document.getElementById('targetForm').addEventListener('submit', onSubmitTarget);
+  }
+
+  function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
+  function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
+
+  /* ============ หน้าแรก ============ */
+  function renderHome() {
+    google.script.run.withSuccessHandler(renderHomeSummary).withFailureHandler(showError).getHomeSummary();
+  }
+
+  function renderHomeSummary(summary) {
+    HOME_FOLLOWUPS = summary.followUps;
+    const fu = document.getElementById('followUpList');
+    fu.innerHTML = '';
+    if (!summary.followUps.length) {
+      fu.innerHTML = '<div class="empty-note">ไม่มีนัดหมายในช่วงนี้</div>';
+    } else {
+      summary.followUps.forEach(function (d) {
+        const li = document.createElement('li');
+        const dateOnly = String(d.date).slice(0, 10);
+        const today = todayStr();
+        let badgeClass, badgeLabel;
+        if (dateOnly < today) {
+          badgeClass = 'badge-overdue'; badgeLabel = 'เลยกำหนด';
+        } else if (dateOnly === today) {
+          badgeClass = 'badge-today'; badgeLabel = 'วันนี้';
+        } else {
+          const diffDays = Math.round((new Date(dateOnly) - new Date(today)) / 86400000);
+          badgeClass = 'badge-upcoming'; badgeLabel = 'อีก ' + diffDays + ' วัน';
+        }
+        li.innerHTML =
+          '<div class="li-main"><div class="li-name">' + escapeHtml(d.customerName) + '</div>' +
+          '<div class="li-sub">' + escapeHtml(d.product || '') + (d.note ? ' • ' + escapeHtml(d.note) : '') + '</div></div>' +
+          '<div class="li-side ' + badgeClass + '">' + badgeLabel + '<br>' + dateOnly + '</div>';
+        li.addEventListener('click', function () {
+          if (d.type === 'appointment') {
+            openEditAppointmentModal(d.id);
+          } else {
+            switchView('deals'); setTimeout(function () { openEditDealModal(d.id); }, 0);
+          }
+        });
+        fu.appendChild(li);
+      });
+    }
+
+    renderPremiumDues(summary.premiumDues || []);
+
+    const t = summary.salesTarget;
+    document.getElementById('targetAchieved').textContent = '฿ ' + t.achieved.toLocaleString();
+    document.getElementById('targetOf').textContent = 'จากเป้า ฿ ' + t.target.toLocaleString();
+    document.getElementById('targetDealCount').textContent = 'ปิดแล้ว ' + t.dealCount + ' ดีล';
+    const fill = document.getElementById('targetFill');
+    const pct = Math.min(t.percent, 100);
+    fill.style.width = pct + '%';
+    fill.classList.toggle('complete', t.percent >= 100);
+  }
+
+  /* ---- แจ้งเตือนถึงกำหนดชำระเบี้ย (ทุกประเภทกรมธรรม์) ---- */
+  function renderPremiumDues(list) {
+    const box = document.getElementById('premiumDueList');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!list.length) {
+      box.innerHTML = '<div class="empty-note">ไม่มีเบี้ยที่ถึงกำหนดชำระใน 30 วันนี้</div>';
+      return;
+    }
+    const today = todayStr();
+    list.forEach(function (a) {
+      const dateOnly = String(a.dueDate).slice(0, 10);
+      let dueText;
+      if (a.overdue || dateOnly < today) {
+        dueText = '<span class="text-danger">เลยกำหนดแล้ว</span><br>' + dateOnly;
+      } else if (dateOnly === today) {
+        dueText = '<span class="text-danger">ครบกำหนดวันนี้</span><br>' + dateOnly;
+      } else {
+        const diffDays = Math.round((new Date(dateOnly) - new Date(today)) / 86400000);
+        dueText = 'อีก ' + diffDays + ' วัน<br>' + dateOnly;
+      }
+
+      const chips = [];
+      if (a.policyNo) {
+        chips.push('<span class="due-chip"><span class="due-chip-key">' +
+          escapeHtml(a.policyNoLabel || 'เลขที่กรมธรรม์') + '</span> ' + escapeHtml(a.policyNo) + '</span>');
+      }
+      if (a.policyType) {
+        const typeKey = a.category === 'car' ? 'ประเภทประกันรถยนต์' : 'ประเภท';
+        chips.push('<span class="due-chip"><span class="due-chip-key">' + typeKey + '</span> ' +
+          escapeHtml(a.policyType) + '</span>');
+      }
+
+      const sub = [];
+      if (a.company) sub.push(escapeHtml(a.company));
+      if (a.premium) sub.push('เบี้ย ฿ ' + Number(a.premium).toLocaleString());
+
+      const div = document.createElement('div');
+      div.className = 'alert-item';
+      div.innerHTML =
+        '<div class="alert-row"><div>' +
+        '<div class="alert-label">' + escapeHtml(a.label) + '</div>' +
+        '<div class="alert-name">' + escapeHtml(a.customerName) + '</div>' +
+        (chips.length ? '<div class="due-chips">' + chips.join('') + '</div>' : '') +
+        (sub.length ? '<div class="alert-detail">' + sub.join(' • ') + '</div>' : '') +
+        '</div><div class="alert-due">' + dueText + '</div></div>';
+      div.addEventListener('click', function () { openCustomerDetail(a.customerId); });
+      box.appendChild(div);
+    });
+  }
+
+  function openTargetModal() {
+    google.script.run.withSuccessHandler(function (val) {
+      document.getElementById('targetInput').value = val || '';
+      openModal('targetModalOverlay');
+    }).withFailureHandler(showError).getSalesTarget();
+  }
+
+  function onSubmitTarget(e) {
+    e.preventDefault();
+    const val = parseFloat(document.getElementById('targetInput').value) || 0;
+    google.script.run.withSuccessHandler(function () {
+      closeModal('targetModalOverlay');
+      showToast('ตั้งเป้าหมายแล้ว');
+      renderHome();
+    }).withFailureHandler(showError).setSalesTarget(val);
+  }
+
+  function onExportExcel() {
+    const btn = document.getElementById('btnExport');
+    const original = btn.textContent;
+    btn.textContent = 'กำลังสร้างไฟล์...'; btn.disabled = true;
+    google.script.run
+      .withSuccessHandler(function (result) {
+        downloadBase64File(result.filename, result.mimeType, result.base64);
+        showToast('ดาวน์โหลดรายงานแล้ว');
+        btn.textContent = original; btn.disabled = false;
+      })
+      .withFailureHandler(function (err) { showError(err); btn.textContent = original; btn.disabled = false; })
+      .exportDashboardReport();
+  }
+
+  function downloadBase64File(filename, mimeType, base64) {
+    const byteChars = atob(base64);
+    const byteNumbers = new Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+    const blob = new Blob([new Uint8Array(byteNumbers)], { type: mimeType });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob); link.download = filename;
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    setTimeout(function () { URL.revokeObjectURL(link.href); }, 3000);
+  }
+
+  /* ============ ลูกค้า: รายชื่อ ============ */
+  function getFamilyList_() {
+    // รายชื่อครอบครัวที่ไม่ซ้ำกันทั้งหมด พร้อมจำนวนคนในแต่ละครอบครัว เรียงตามตัวอักษร
+    const counts = {};
+    CUSTOMERS.forEach(function (c) {
+      const fam = (c.familyName || '').trim();
+      if (!fam) return;
+      counts[fam] = (counts[fam] || 0) + 1;
+    });
+    return Object.keys(counts).sort(function (a, b) { return a.localeCompare(b, 'th'); })
+      .map(function (fam) { return { name: fam, count: counts[fam] }; });
+  }
+
+  function getSortedCustomers() {
+    let list = CUSTOMERS.slice();
+    if (CUSTOMER_FAMILY_FILTER) {
+      list = list.filter(function (c) { return (c.familyName || '').trim() === CUSTOMER_FAMILY_FILTER; });
+    }
+    // เรียงตามชื่อ-นามสกุลผู้เอาประกัน ตามตัวอักษรเสมอ
+    list.sort(function (a, b) {
+      return String(a.fullName || '').localeCompare(String(b.fullName || ''), 'th');
+    });
+    return list;
+  }
+
+  function toggleFamilyFilterMenu() {
+    const menu = document.getElementById('familyFilterMenu');
+    if (menu.classList.contains('hidden')) openFamilyFilterMenu(); else closeFamilyFilterMenu();
+  }
+
+  function openFamilyFilterMenu() {
+    const menu = document.getElementById('familyFilterMenu');
+    const families = getFamilyList_();
+    let html = '<div class="family-filter-item' + (CUSTOMER_FAMILY_FILTER === null ? ' active' : '') + '" data-family="">' +
+      'ทั้งหมด <span class="family-filter-count">' + CUSTOMERS.length + '</span></div>';
+    if (!families.length) {
+      html += '<div class="family-filter-empty">ยังไม่มีข้อมูลชื่อครอบครัว</div>';
+    } else {
+      html += families.map(function (f) {
+        return '<div class="family-filter-item' + (CUSTOMER_FAMILY_FILTER === f.name ? ' active' : '') + '" data-family="' + escapeHtml(f.name) + '">' +
+          escapeHtml(f.name) + ' <span class="family-filter-count">' + f.count + '</span></div>';
+      }).join('');
+    }
+    menu.innerHTML = html;
+    menu.querySelectorAll('.family-filter-item[data-family]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        CUSTOMER_FAMILY_FILTER = el.dataset.family || null;
+        closeFamilyFilterMenu();
+        renderCustomersList();
+      });
+    });
+    menu.classList.remove('hidden');
+    document.getElementById('btnFamilyFilter').classList.add('active');
+  }
+
+  function closeFamilyFilterMenu() {
+    document.getElementById('familyFilterMenu').classList.add('hidden');
+    document.getElementById('btnFamilyFilter').classList.toggle('active', !!CUSTOMER_FAMILY_FILTER);
+  }
+
+  function renderCustomersList() {
+    const tbody = document.getElementById('customerLedgerBody');
+    tbody.innerHTML = '';
+    document.getElementById('familyFilterLabel').textContent = CUSTOMER_FAMILY_FILTER || 'ทั้งหมด';
+
+    const list = getSortedCustomers();
+    const emptyEl = document.getElementById('customerEmpty');
+    if (!CUSTOMERS.length) {
+      emptyEl.textContent = 'ยังไม่มีข้อมูลลูกค้า กดปุ่ม "เพิ่มลูกค้าใหม่" เพื่อเริ่มต้น';
+      emptyEl.classList.remove('hidden');
+    } else if (!list.length) {
+      emptyEl.textContent = 'ไม่พบลูกค้าในครอบครัว "' + CUSTOMER_FAMILY_FILTER + '"';
+      emptyEl.classList.remove('hidden');
+    } else {
+      emptyEl.classList.add('hidden');
+    }
+
+    list.forEach(function (c) {
+      const tr = document.createElement('tr');
+      tr.className = 'ledger-row';
+      tr.innerHTML =
+        '<td class="company">' + escapeHtml(c.fullName) + '</td>' +
+        '<td class="muted">' + escapeHtml(c.familyName || '—') + '</td>' +
+        '<td class="muted">' + escapeHtml(c.phone || '—') + '</td>' +
+        '<td class="muted">' + escapeHtml(c.email || '—') + '</td>';
+      tr.addEventListener('click', function () { openCustomerDetail(c.id); });
+      tbody.appendChild(tr);
+    });
+  }
+
+  function getCurrentCustomer() {
+    return CUSTOMERS.filter(function (c) { return c.id === CURRENT_CUSTOMER_ID; })[0] || null;
+  }
+
+  /* ============ ลูกค้า: แฟ้มข้อมูล ============ */
+  function openCustomerDetail(id) {
+    CURRENT_CUSTOMER_ID = id;
+    const c = CUSTOMERS.filter(function (x) { return x.id === id; })[0];
+    if (!c) { showToast('ไม่พบข้อมูลลูกค้า', true); return; }
+
+    document.getElementById('pageTitle').textContent = c.fullName;
+    document.getElementById('pageDesc').textContent = 'แฟ้มข้อมูลลูกค้ารายบุคคล';
+    document.getElementById('cdName').textContent = c.fullName;
+    document.getElementById('cdSub').textContent = [c.familyName, c.phone, c.email].filter(Boolean).join(' • ') || '—';
+
+    renderCustomerInfo(c);
+    switchCustomerTab('info');
+    switchView('customerDetail');
+
+    ['life', 'car', 'fire', 'travel', 'other'].forEach(function (cat) {
+      google.script.run.withSuccessHandler(function (list) {
+        POLICY_CACHE[cat] = list;
+        if (CURRENT_CUSTOMER_ID === id) renderPolicyTable(cat);
+      }).withFailureHandler(showError).getPolicies(cat, id);
+    });
+    google.script.run.withSuccessHandler(function (list) {
+      SERVICE_CACHE = list;
+      if (CURRENT_CUSTOMER_ID === id) renderServiceTable();
+    }).withFailureHandler(showError).getServiceRecords(id);
+  }
+
+  function formatDateThai_(dateStr) {
+    // รับค่ารูปแบบ yyyy-MM-dd... และแปลงเป็น วว/ดด/ปปปป
+    if (!dateStr) return '';
+    const ymd = String(dateStr).slice(0, 10).split('-');
+    if (ymd.length !== 3) return String(dateStr);
+    return ymd[2] + '/' + ymd[1] + '/' + ymd[0];
+  }
+
+  function renderCustomerInfo(c) {
+    const grid = document.getElementById('cdInfoGrid');
+    const items = [
+      ['ชื่อครอบครัว', c.familyName], ['ชื่อ-นามสกุลผู้เอาประกัน', c.fullName],
+      ['วันเดือนปีเกิด', formatDateThai_(c.birthDate)],
+      ['ที่อยู่', c.address], ['เบอร์โทรศัพท์', c.phone], ['อีเมล', c.email]
+    ];
+    grid.innerHTML = items.map(function (it) {
+      const v = it[1];
+      return '<div class="info-item"><div class="label">' + it[0] + '</div>' +
+        '<div class="value' + (v ? '' : ' empty') + '">' + (v ? escapeHtml(v) : 'ไม่ระบุ') + '</div></div>';
+    }).join('');
+    document.getElementById('cdRemark').textContent = c.remark || 'ไม่มี remark';
+  }
+
+  function switchCustomerTab(tab) {
+    document.querySelectorAll('#customerTabs .tab-btn').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.tab === tab);
+    });
+    document.querySelectorAll('.tab-panel').forEach(function (el) {
+      el.classList.toggle('active', el.dataset.tabPanel === tab);
+    });
+  }
+
+  /* ============ ตารางกรมธรรม์ (generic ตามหมวด) ============ */
+  function getCategorySchema(category) {
+    const schemas = {
+      life: {
+        title: 'กรมธรรม์ชีวิต/สุขภาพ/โรคร้ายแรง/อุบัติเหตุ/บำนาญ',
+        fields: [
+          { key: 'seq', label: 'ลำดับ', type: 'text' },
+          { key: 'type', label: 'ประเภท', type: 'select', options: CONSTANTS.lifeHealthTypes },
+          { key: 'policyNo', label: 'เลขที่กรมธรรม์', type: 'text' },
+          { key: 'policyDate', label: 'วันที่กรมธรรม์', type: 'date' },
+          { key: 'company', label: 'บริษัทประกัน', type: 'text' },
+          { key: 'mainContract', label: 'สัญญาหลัก', type: 'text' },
+          { key: 'riders', label: 'สัญญาเพิ่มเติม', type: 'text' },
+          { key: 'dueDate', label: 'วันที่ครบกำหนดชำระเบี้ย', type: 'date' },
+          { key: 'remark', label: 'Remark', type: 'textarea' }
+        ]
+      },
+      car: {
+        title: 'ประกันรถยนต์',
+        fields: [
+          { key: 'seq', label: 'ลำดับที่', type: 'text' },
+          { key: 'plate', label: 'ทะเบียนรถ', type: 'text' },
+          { key: 'brand', label: 'ยี่ห้อ', type: 'text' },
+          { key: 'model', label: 'รุ่นรถ', type: 'text' },
+          { key: 'regDate', label: 'วันที่จดทะเบียน', type: 'date' },
+          { key: 'company', label: 'บริษัทประกัน', type: 'text' },
+          { key: 'type', label: 'ประเภท', type: 'text' },
+          { key: 'premium', label: 'เบี้ยสุทธิ', type: 'number' },
+          { key: 'endDate', label: 'วันที่สิ้นสุดความคุ้มครอง', type: 'date' },
+          { key: 'nbRenewal', label: 'New Business/Renewal', type: 'select', options: CONSTANTS.nbRenewalOptions },
+          { key: 'broker', label: 'โบรคเกอร์', type: 'select', options: CONSTANTS.brokers }
+        ]
+      },
+      fire: {
+        title: 'ประกันอัคคีภัยบ้าน',
+        fields: [
+          { key: 'seq', label: 'ลำดับที่', type: 'text' },
+          { key: 'location', label: 'สถานที่เอาประกัน', type: 'text' },
+          { key: 'type', label: 'ประเภท', type: 'text' },
+          { key: 'company', label: 'บริษัทประกัน', type: 'text' },
+          { key: 'period', label: 'ระยะเวลา', type: 'select', options: CONSTANTS.firePeriods },
+          { key: 'premium', label: 'เบี้ยสุทธิ', type: 'number' },
+          { key: 'endDate', label: 'วันที่สิ้นสุดความคุ้มครอง', type: 'date' },
+          { key: 'nbRenewal', label: 'New Business/Renewal', type: 'select', options: CONSTANTS.nbRenewalOptions },
+          { key: 'broker', label: 'โบรคเกอร์', type: 'select', options: CONSTANTS.brokers }
+        ]
+      },
+      travel: {
+        title: 'ประกันเดินทาง',
+        fields: [
+          { key: 'company', label: 'บริษัทประกัน', type: 'text' },
+          { key: 'type', label: 'ประเภท', type: 'select', options: CONSTANTS.travelTypes },
+          { key: 'country', label: 'ประเทศ', type: 'text' },
+          { key: 'departDate', label: 'วันที่เดินทางไป', type: 'date' },
+          { key: 'returnDate', label: 'วันที่เดินทางกลับ', type: 'date' },
+          { key: 'premium', label: 'เบี้ยสุทธิ', type: 'number' }
+        ]
+      },
+      other: {
+        title: 'สินค้าอื่นๆ',
+        fields: [{ key: 'detail', label: 'รายละเอียด (ระบุ)', type: 'textarea' }]
+      }
+    };
+    return schemas[category];
+  }
+
+  function updateTabCount(category) {
+    const el = document.getElementById('tabCount-' + category);
+    if (!el) return;
+    el.textContent = (POLICY_CACHE[category] || []).length;
+  }
+
+  function renderPolicyTable(category) {
+    updateTabCount(category);
+    const schema = getCategorySchema(category);
+    const table = document.getElementById('tbl-' + category);
+    const thead = table.querySelector('thead');
+    const tbody = table.querySelector('tbody');
+    thead.innerHTML = '<tr>' + schema.fields.map(function (f) { return '<th>' + f.label + '</th>'; }).join('') + '</tr>';
+
+    const list = POLICY_CACHE[category] || [];
+    tbody.innerHTML = '';
+    if (!list.length) {
+      tbody.innerHTML = '<tr><td colspan="' + schema.fields.length + '" style="color:var(--ink-faint);padding:20px 8px;">ยังไม่มีข้อมูล</td></tr>';
+      return;
+    }
+    list.forEach(function (item) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = schema.fields.map(function (f) {
+        let v = item[f.key];
+        if (f.type === 'date' && v) v = String(v).slice(0, 10);
+        if (f.type === 'number' && v) v = Number(v).toLocaleString('en-US', { maximumFractionDigits: 20 });
+        return '<td' + (f.type === 'textarea' ? ' class="wrap"' : '') + '>' + (v ? escapeHtml(String(v)) : '—') + '</td>';
+      }).join('');
+      tr.addEventListener('click', function () { openRecordModal(category, item); });
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderServiceTable() {
+    const tbody = document.querySelector('#tbl-service tbody');
+    const thead = document.querySelector('#tbl-service thead');
+    thead.innerHTML = '<tr><th>วันที่</th><th>ประเภท</th><th>รายละเอียด</th></tr>';
+    tbody.innerHTML = '';
+    if (!SERVICE_CACHE.length) {
+      tbody.innerHTML = '<tr><td colspan="3" style="color:var(--ink-faint);padding:20px 8px;">ยังไม่มีบันทึกบริการ</td></tr>';
+      return;
+    }
+    SERVICE_CACHE.forEach(function (s) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td>' + String(s.date).slice(0, 10) + '</td><td>' + escapeHtml(s.type) + '</td><td class="wrap">' + escapeHtml(s.detail || '—') + '</td>';
+      tr.addEventListener('click', function () { openServiceModal(s); });
+      tbody.appendChild(tr);
+    });
+  }
+
+  /* ============ Generic field render/read สำหรับ modal ที่มี select+เพิ่มใหม่ ============ */
+  function buildFieldHtml(field, idPrefix) {
+    const id = idPrefix + field.key;
+    if (field.type === 'select') {
+      const opts = (field.options || []).map(function (o) { return '<option value="' + escapeHtml(o) + '">' + escapeHtml(o) + '</option>'; }).join('');
+      return '<label>' + field.label + '<select id="' + id + '"><option value="">— ไม่ระบุ —</option>' + opts +
+        '<option value="__new__">+ เพิ่มใหม่...</option></select>' +
+        '<input type="text" id="' + id + '_custom" class="hidden" placeholder="พิมพ์ค่าที่ต้องการ"></label>';
+    }
+    if (field.type === 'textarea') {
+      return '<label>' + field.label + '<textarea id="' + id + '" rows="3"></textarea></label>';
+    }
+    return '<label>' + field.label + '<input type="' + field.type + '" id="' + id + '"' + (field.type === 'number' ? ' step="any" min="0"' : '') + '></label>';
+  }
+
+  function getFieldValue(field, idPrefix) {
+    const id = idPrefix + field.key;
+    if (field.type === 'select') return getSelectOrCustomValue(id, id + '_custom');
+    return document.getElementById(id).value;
+  }
+
+  function setFieldValue(field, idPrefix, value) {
+    const id = idPrefix + field.key;
+    if (field.type === 'select') { setSelectOrCustom(id, id + '_custom', value || ''); return; }
+    if (field.type === 'date' && value) { document.getElementById(id).value = String(value).slice(0, 10); return; }
+    document.getElementById(id).value = value || '';
+  }
+
+  /* ============ Modal: กรมธรรม์ (generic) ============ */
+  function openRecordModal(category, record) {
+    const schema = getCategorySchema(category);
+    document.getElementById('recordModalTitle').textContent = (record ? 'แก้ไข' : 'เพิ่ม') + schema.title;
+    document.getElementById('recCategory').value = category;
+    document.getElementById('recId').value = record ? record.id : '';
+    document.getElementById('recBtnDelete').classList.toggle('hidden', !record);
+
+    const container = document.getElementById('recordFields');
+    container.innerHTML = schema.fields.map(function (f) { return buildFieldHtml(f, 'rf_'); }).join('');
+
+    schema.fields.forEach(function (f) {
+      if (f.type === 'select') {
+        document.getElementById('rf_' + f.key).addEventListener('change', function () {
+          toggleCustomInput('rf_' + f.key, 'rf_' + f.key + '_custom');
+        });
+      }
+      setFieldValue(f, 'rf_', record ? record[f.key] : '');
+    });
+
+    openModal('recordModalOverlay');
+  }
+
+  function onSubmitRecord(e) {
+    e.preventDefault();
+    const category = document.getElementById('recCategory').value;
+    const id = document.getElementById('recId').value;
+    const schema = getCategorySchema(category);
+    const data = { customerId: CURRENT_CUSTOMER_ID };
+    schema.fields.forEach(function (f) { data[f.key] = getFieldValue(f, 'rf_'); });
+
+    if (id) {
+      data.id = id;
+      google.script.run.withSuccessHandler(function () {
+        closeModal('recordModalOverlay'); showToast('บันทึกแล้ว');
+        google.script.run.withSuccessHandler(function (list) { POLICY_CACHE[category] = list; renderPolicyTable(category); })
+          .withFailureHandler(showError).getPolicies(category, CURRENT_CUSTOMER_ID);
+      }).withFailureHandler(showError).updatePolicy(category, data);
+    } else {
+      google.script.run.withSuccessHandler(function () {
+        closeModal('recordModalOverlay'); showToast('เพิ่มข้อมูลแล้ว');
+        google.script.run.withSuccessHandler(function (list) { POLICY_CACHE[category] = list; renderPolicyTable(category); })
+          .withFailureHandler(showError).getPolicies(category, CURRENT_CUSTOMER_ID);
+      }).withFailureHandler(showError).addPolicy(category, data);
+    }
+  }
+
+  function onDeleteRecord() {
+    const category = document.getElementById('recCategory').value;
+    const id = document.getElementById('recId').value;
+    if (!id || !confirm('ต้องการลบรายการนี้ใช่หรือไม่?')) return;
+    google.script.run.withSuccessHandler(function () {
+      closeModal('recordModalOverlay'); showToast('ลบแล้ว');
+      POLICY_CACHE[category] = POLICY_CACHE[category].filter(function (x) { return x.id !== id; });
+      renderPolicyTable(category);
+    }).withFailureHandler(showError).deletePolicy(category, id);
+  }
+
+  /* ============ Modal: บริการหลังการขาย ============ */
+  function openServiceModal(record) {
+    document.getElementById('serviceModalTitle').textContent = record ? 'แก้ไขบันทึกบริการหลังการขาย' : 'เพิ่มบันทึกบริการหลังการขาย';
+    document.getElementById('serviceForm').reset();
+    document.getElementById('svcId').value = record ? record.id : '';
+    document.getElementById('svcBtnDelete').classList.toggle('hidden', !record);
+    document.getElementById('svcDate').value = record ? String(record.date).slice(0, 10) : todayStr();
+    document.getElementById('svcType').value = record ? record.type : 'เคลม';
+    document.getElementById('svcDetail').value = record ? (record.detail || '') : '';
+    openModal('serviceModalOverlay');
+  }
+
+  function onSubmitService(e) {
+    e.preventDefault();
+    const id = document.getElementById('svcId').value;
+    const data = {
+      customerId: CURRENT_CUSTOMER_ID,
+      date: document.getElementById('svcDate').value,
+      type: document.getElementById('svcType').value,
+      detail: document.getElementById('svcDetail').value
+    };
+    if (id) {
+      data.id = id;
+      google.script.run.withSuccessHandler(function () {
+        closeModal('serviceModalOverlay'); showToast('บันทึกแล้ว');
+        google.script.run.withSuccessHandler(function (list) { SERVICE_CACHE = list; renderServiceTable(); })
+          .withFailureHandler(showError).getServiceRecords(CURRENT_CUSTOMER_ID);
+      }).withFailureHandler(showError).updateServiceRecord(data);
+    } else {
+      google.script.run.withSuccessHandler(function () {
+        closeModal('serviceModalOverlay'); showToast('บันทึกแล้ว');
+        google.script.run.withSuccessHandler(function (list) { SERVICE_CACHE = list; renderServiceTable(); })
+          .withFailureHandler(showError).getServiceRecords(CURRENT_CUSTOMER_ID);
+      }).withFailureHandler(showError).addServiceRecord(data);
+    }
+  }
+
+  function onDeleteService() {
+    const id = document.getElementById('svcId').value;
+    if (!id || !confirm('ต้องการลบบันทึกบริการนี้ใช่หรือไม่?')) return;
+    google.script.run.withSuccessHandler(function () {
+      closeModal('serviceModalOverlay'); showToast('ลบแล้ว');
+      SERVICE_CACHE = SERVICE_CACHE.filter(function (x) { return x.id !== id; });
+      renderServiceTable();
+    }).withFailureHandler(showError).deleteServiceRecord(id);
+  }
+
+  /* ============ Modal: ลูกค้า ============ */
+  function openAddCustomerModal() {
+    document.getElementById('customerModalTitle').textContent = 'เพิ่มลูกค้าใหม่';
+    document.getElementById('customerForm').reset();
+    document.getElementById('custId').value = '';
+    document.getElementById('custBtnDelete').classList.add('hidden');
+    openModal('customerModalOverlay');
+  }
+
+  function openEditCustomerModal(c) {
+    if (!c) return;
+    document.getElementById('customerModalTitle').textContent = 'แก้ไขข้อมูลส่วนตัว';
+    document.getElementById('custId').value = c.id;
+    document.getElementById('custFamilyName').value = c.familyName || '';
+    document.getElementById('custFullName').value = c.fullName || '';
+    document.getElementById('custBirthDate').value = c.birthDate ? String(c.birthDate).slice(0, 10) : '';
+    document.getElementById('custAddress').value = c.address || '';
+    document.getElementById('custPhone').value = c.phone || '';
+    document.getElementById('custEmail').value = c.email || '';
+    document.getElementById('custRemark').value = c.remark || '';
+    document.getElementById('custBtnDelete').classList.remove('hidden');
+    openModal('customerModalOverlay');
+  }
+
+  function onSubmitCustomer(e) {
+    e.preventDefault();
+    const id = document.getElementById('custId').value;
+    const data = {
+      id: id,
+      familyName: document.getElementById('custFamilyName').value,
+      fullName: document.getElementById('custFullName').value,
+      birthDate: document.getElementById('custBirthDate').value,
+      address: document.getElementById('custAddress').value,
+      phone: document.getElementById('custPhone').value,
+      email: document.getElementById('custEmail').value,
+      remark: document.getElementById('custRemark').value
+    };
+    const fn = id ? 'updateCustomer' : 'addCustomer';
+    google.script.run.withSuccessHandler(function () {
+      closeModal('customerModalOverlay');
+      showToast(id ? 'บันทึกการแก้ไขแล้ว' : 'เพิ่มลูกค้าแล้ว');
+      reloadCustomers(function () {
+        if (id && CURRENT_VIEW === 'customerDetail') openCustomerDetail(id);
+        else renderCustomersList();
+      });
+    }).withFailureHandler(showError)[fn](data);
+  }
+
+  function onDeleteCustomer() {
+    const id = document.getElementById('custId').value;
+    if (!id || !confirm('ลบลูกค้ารายนี้ใช่หรือไม่? ข้อมูลกรมธรรม์/ดีลที่เกี่ยวข้องจะยังอยู่ในระบบแต่จะไม่ผูกกับลูกค้าอีกต่อไป')) return;
+    google.script.run.withSuccessHandler(function () {
+      closeModal('customerModalOverlay');
+      showToast('ลบลูกค้าแล้ว');
+      reloadCustomers(function () { switchView('customers'); });
+    }).withFailureHandler(showError).deleteCustomer(id);
+  }
+
+  /* ============ ดีล: บอร์ด ============ */
+  function renderDealsBoard() {
+    const board = document.getElementById('board');
+    board.innerHTML = '';
+    const search = document.getElementById('searchBox');
+    const keyword = search ? search.value.trim().toLowerCase() : '';
+
+    CONSTANTS.dealStages.forEach(function (stage, idx) {
+      const col = document.createElement('div');
+      col.className = 'column';
+      const header = document.createElement('div');
+      header.className = 'column-header';
+      header.style.borderBottomColor = STAGE_COLORS[idx];
+
+      const dealsInStage = DEALS.filter(function (d) {
+        const matchStage = d.stage === stage;
+        const matchKeyword = !keyword ||
+          (d.customerName || '').toLowerCase().indexOf(keyword) !== -1 ||
+          (d.product || '').toLowerCase().indexOf(keyword) !== -1;
+        return matchStage && matchKeyword;
+      });
+
+      header.innerHTML = '<span>' + stage + '</span><span class="col-count">' + dealsInStage.length + '</span>';
+      col.appendChild(header);
+
+      const body = document.createElement('div');
+      body.className = 'column-body';
+      body.dataset.stage = stage;
+      body.addEventListener('dragover', function (e) { e.preventDefault(); body.classList.add('drag-over'); });
+      body.addEventListener('dragleave', function () { body.classList.remove('drag-over'); });
+      body.addEventListener('drop', function (e) {
+        e.preventDefault(); body.classList.remove('drag-over');
+        const id = e.dataTransfer.getData('text/plain');
+        const deal = DEALS.filter(function (d) { return d.id === id; })[0];
+        if (deal && deal.stage !== stage) {
+          google.script.run.withSuccessHandler(function () {
+            showToast('เปลี่ยนสถานะเป็น "' + stage + '" แล้ว');
+            reloadDeals(renderDealsBoard);
+          }).withFailureHandler(showError).updateDealStage(id, stage, todayStr(), '');
+        }
+      });
+
+      dealsInStage.forEach(function (deal) { body.appendChild(renderDealCard(deal, STAGE_COLORS[idx])); });
+      col.appendChild(body);
+      board.appendChild(col);
+    });
+  }
+
+  const DEAL_DETAIL_FIELDS = ['newDetail', 'contactedDetail', 'quotedDetail', 'negotiatingDetail', 'closedDetail'];
+  function currentStageDetail_(deal) {
+    // แสดงรายละเอียดล่าสุดที่มีข้อมูล โดยไล่ย้อนจากสถานะปัจจุบันกลับไปจนถึงตอนสร้างดีล
+    // (เผื่อกรณีที่กรอกรายละเอียดไว้ตอนสร้างดีล แต่ยังไม่ได้กรอกรายละเอียดของสถานะถัดๆ มา)
+    const idx = CONSTANTS.dealStages.indexOf(deal.stage);
+    const startIdx = idx === -1 ? DEAL_DETAIL_FIELDS.length - 1 : idx;
+    for (let i = startIdx; i >= 0; i--) {
+      const val = deal[DEAL_DETAIL_FIELDS[i]];
+      if (val) return val;
+    }
+    return '';
+  }
+
+  function renderDealCard(deal, color) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.draggable = true;
+    card.style.borderLeftColor = color;
+
+    let html = '<h4>' + escapeHtml(deal.customerName) + '</h4>';
+    html += '<div class="meta' + (deal.product ? '' : ' muted-italic') + '">' +
+      (deal.product ? escapeHtml(deal.product) : 'ยังไม่ระบุผลิตภัณฑ์') + '</div>';
+    html += '<div class="value' + (deal.value ? '' : ' muted-italic') + '">' +
+      (deal.value ? '฿ ' + Number(deal.value).toLocaleString() : 'ยังไม่ระบุมูลค่า') + '</div>';
+    const detailText = currentStageDetail_(deal);
+    html += '<div class="card-detail' + (detailText ? '' : ' muted-italic') + '">' +
+      (detailText ? escapeHtml(detailText) : 'ยังไม่มีรายละเอียด') + '</div>';
+    if (deal.nextFollowUpDate && deal.stage !== 'ปิดการขาย') {
+      html += '<div class="followup-flag">นัดหมาย ' + String(deal.nextFollowUpDate).slice(0, 10) + '</div>';
+    }
+
+    html += '<select class="card-stage-select" draggable="false">' +
+      CONSTANTS.dealStages.map(function (s) {
+        return '<option value="' + escapeHtml(s) + '"' + (s === deal.stage ? ' selected' : '') + '>' + escapeHtml(s) + '</option>';
+      }).join('') + '</select>';
+
+    card.innerHTML = html;
+
+    card.addEventListener('dragstart', function (e) {
+      e.dataTransfer.setData('text/plain', deal.id);
+      setTimeout(function () { card.classList.add('dragging'); }, 0);
+    });
+    card.addEventListener('dragend', function () { card.classList.remove('dragging'); });
+    card.addEventListener('click', function () { openEditDealModal(deal.id); });
+
+    const stageSelect = card.querySelector('.card-stage-select');
+    stageSelect.addEventListener('click', function (e) { e.stopPropagation(); });
+    stageSelect.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+    stageSelect.addEventListener('change', function (e) {
+      e.stopPropagation();
+      const newStage = stageSelect.value;
+      if (newStage === deal.stage) return;
+      google.script.run.withSuccessHandler(function () {
+        showToast('เปลี่ยนสถานะเป็น "' + newStage + '" แล้ว');
+        reloadDeals(renderDealsBoard);
+      }).withFailureHandler(function (err) {
+        stageSelect.value = deal.stage;
+        showError(err);
+      }).updateDealStage(deal.id, newStage, todayStr(), '');
+    });
+
+    return card;
+  }
+
+  function populateProductSelect(selected) {
+    const sel = document.getElementById('dealProduct');
+    sel.innerHTML = '<option value="">— ไม่ระบุ —</option>' +
+      CONSTANTS.productTypes.map(function (p) { return '<option value="' + escapeHtml(p) + '">' + escapeHtml(p) + '</option>'; }).join('') +
+      '<option value="__new__">+ เพิ่มผลิตภัณฑ์ใหม่...</option>';
+    setSelectOrCustom('dealProduct', 'dealProductCustom', selected || '');
+  }
+
+  function populateCustomerSelect(selectedId) {
+    const sel = document.getElementById('dealCustomer');
+    if (!CUSTOMERS.length) {
+      sel.innerHTML = '<option value="">— ยังไม่มีลูกค้าในระบบ กรุณาเพิ่มลูกค้าก่อน —</option>';
+      return;
+    }
+    sel.innerHTML = CUSTOMERS.map(function (c) {
+      return '<option value="' + c.id + '">' + escapeHtml(c.fullName) + '</option>';
+    }).join('');
+    if (selectedId) sel.value = selectedId;
+  }
+
+  function openAddDealModal() {
+    if (!CUSTOMERS.length) {
+      showToast('กรุณาเพิ่มลูกค้าในระบบก่อนสร้างดีล', true);
+      switchView('customers');
+      return;
+    }
+    document.getElementById('dealModalTitle').textContent = 'เพิ่มดีลใหม่';
+    document.getElementById('dealForm').reset();
+    document.getElementById('dealId').value = '';
+    document.getElementById('dealTimeline').classList.add('hidden');
+    document.getElementById('dealTimeline').innerHTML = '';
+    document.getElementById('dealBtnDelete').classList.add('hidden');
+    document.getElementById('dealDateLabel').classList.remove('hidden');
+    document.getElementById('dealDate').closest('label').classList.remove('hidden');
+    document.getElementById('dealDate').value = todayStr();
+    populateCustomerSelect(null);
+    populateProductSelect('');
+    openModal('dealModalOverlay');
+  }
+
+  function openEditDealModal(id) {
+    const deal = DEALS.filter(function (d) { return d.id === id; })[0];
+    if (!deal) return;
+    document.getElementById('dealModalTitle').textContent = 'แก้ไขดีล';
+    document.getElementById('dealId').value = deal.id;
+    document.getElementById('dealBtnDelete').classList.remove('hidden');
+    document.getElementById('dealDate').closest('label').classList.add('hidden');
+
+    populateCustomerSelect(deal.customerId);
+    populateProductSelect(deal.product);
+    document.getElementById('dealValue').value = deal.value || '';
+    document.getElementById('dealDetailText').value = deal.newDetail || '';
+
+    renderDealTimeline(deal);
+
+    openModal('dealModalOverlay');
+  }
+
+  function renderDealTimeline(deal) {
+    const el = document.getElementById('dealTimeline');
+    const rows = [
+      { stage: 'ดีลใหม่', date: deal.newDate, detail: deal.newDetail },
+      { stage: 'เสนอราคา', date: deal.quotedDate, detail: deal.quotedDetail },
+      { stage: 'กำลังเจรจา', date: deal.negotiatingDate, detail: deal.negotiatingDetail },
+      { stage: 'ปิดการขาย', date: deal.closedDate, detail: deal.closedDetail }
+    ];
+    el.innerHTML = rows.map(function (r) {
+      const done = !!r.date;
+      return '<li class="' + (done ? 'done' : '') + '">' +
+        '<span class="stage-name">' + r.stage + '</span>' +
+        (done ? '<span class="stage-date">' + String(r.date).slice(0, 10) + '</span>' : '') +
+        (r.detail ? '<div class="stage-detail">' + escapeHtml(r.detail) + '</div>' : '') +
+        '</li>';
+    }).join('');
+    el.classList.remove('hidden');
+  }
+
+  function onSubmitDeal(e) {
+    e.preventDefault();
+    const id = document.getElementById('dealId').value;
+    const customerSel = document.getElementById('dealCustomer');
+    const customerId = customerSel.value;
+    const customerName = customerSel.options[customerSel.selectedIndex] ? customerSel.options[customerSel.selectedIndex].textContent : '';
+    if (!customerId) { showToast('กรุณาเลือกลูกค้า', true); return; }
+
+    const data = {
+      id: id,
+      customerId: customerId,
+      customerName: customerName,
+      product: getSelectOrCustomValue('dealProduct', 'dealProductCustom'),
+      value: parseFloat(document.getElementById('dealValue').value) || 0,
+      newDetail: document.getElementById('dealDetailText').value
+    };
+
+    if (id) {
+      google.script.run.withSuccessHandler(function () {
+        closeModal('dealModalOverlay'); showToast('บันทึกแล้ว');
+        reloadDeals(renderDealsBoard);
+      }).withFailureHandler(showError).updateDeal(data);
+    } else {
+      data.dealDate = document.getElementById('dealDate').value;
+      google.script.run.withSuccessHandler(function () {
+        closeModal('dealModalOverlay'); showToast('เพิ่มดีลใหม่แล้ว');
+        reloadDeals(renderDealsBoard);
+      }).withFailureHandler(showError).addDeal(data);
+    }
+  }
+
+  function onDeleteDeal() {
+    const id = document.getElementById('dealId').value;
+    if (!id || !confirm('ต้องการลบดีลนี้ใช่หรือไม่?')) return;
+    google.script.run.withSuccessHandler(function () {
+      closeModal('dealModalOverlay'); showToast('ลบดีลแล้ว');
+      reloadDeals(renderDealsBoard);
+    }).withFailureHandler(showError).deleteDeal(id);
+  }
+
+  /* ============ นัดหมาย (ไม่ผูกกับดีล) ============ */
+  function populateApptCustomerSelect(selectedId) {
+    const sel = document.getElementById('apptCustomer');
+    sel.innerHTML = '<option value="">— ไม่ระบุ —</option>' +
+      CUSTOMERS.map(function (c) { return '<option value="' + c.id + '">' + escapeHtml(c.fullName) + '</option>'; }).join('');
+    sel.value = selectedId || '';
+  }
+
+  function openAddAppointmentModal() {
+    document.getElementById('appointmentModalTitle').textContent = 'เพิ่มนัดหมาย';
+    document.getElementById('appointmentForm').reset();
+    document.getElementById('apptId').value = '';
+    document.getElementById('apptBtnDelete').classList.add('hidden');
+    populateApptCustomerSelect('');
+    document.getElementById('apptDate').value = todayStr();
+    openModal('appointmentModalOverlay');
+  }
+
+  function openEditAppointmentModal(id) {
+    const appt = HOME_FOLLOWUPS.filter(function (f) { return f.type === 'appointment' && f.id === id; })[0];
+    if (!appt) return;
+    document.getElementById('appointmentModalTitle').textContent = 'แก้ไขนัดหมาย';
+    document.getElementById('apptId').value = appt.id;
+    document.getElementById('apptBtnDelete').classList.remove('hidden');
+    populateApptCustomerSelect(appt.customerId);
+    document.getElementById('apptDate').value = appt.date ? String(appt.date).slice(0, 10) : '';
+    document.getElementById('apptNote').value = appt.note || '';
+    openModal('appointmentModalOverlay');
+  }
+
+  function onSubmitAppointment(e) {
+    e.preventDefault();
+    const id = document.getElementById('apptId').value;
+    const customerSel = document.getElementById('apptCustomer');
+    const customerId = customerSel.value;
+    const customerName = customerId && customerSel.options[customerSel.selectedIndex] ? customerSel.options[customerSel.selectedIndex].textContent : '';
+    const date = document.getElementById('apptDate').value;
+    if (!date) { showToast('กรุณาระบุวันนัดหมาย', true); return; }
+
+    const data = {
+      id: id,
+      customerId: customerId,
+      customerName: customerName,
+      date: date,
+      note: document.getElementById('apptNote').value
+    };
+
+    if (id) {
+      google.script.run.withSuccessHandler(function () {
+        closeModal('appointmentModalOverlay'); showToast('บันทึกแล้ว');
+        renderHome();
+      }).withFailureHandler(showError).updateAppointment(data);
+    } else {
+      google.script.run.withSuccessHandler(function () {
+        closeModal('appointmentModalOverlay'); showToast('เพิ่มนัดหมายแล้ว');
+        renderHome();
+      }).withFailureHandler(showError).addAppointment(data);
+    }
+  }
+
+  function onDeleteAppointment() {
+    const id = document.getElementById('apptId').value;
+    if (!id || !confirm('ต้องการลบนัดหมายนี้ใช่หรือไม่?')) return;
+    google.script.run.withSuccessHandler(function () {
+      closeModal('appointmentModalOverlay'); showToast('ลบนัดหมายแล้ว');
+      renderHome();
+    }).withFailureHandler(showError).deleteAppointment(id);
+  }
+
+  /* ============ Utilities ============ */
+  function todayStr() {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function toggleCustomInput(selectId, customId) {
+    const select = document.getElementById(selectId);
+    const custom = document.getElementById(customId);
+    if (select.value === '__new__') { custom.classList.remove('hidden'); custom.focus(); }
+    else { custom.classList.add('hidden'); custom.value = ''; }
+  }
+
+  function setSelectOrCustom(selectId, customId, value) {
+    const select = document.getElementById(selectId);
+    const custom = document.getElementById(customId);
+    const known = Array.prototype.map.call(select.options, function (o) { return o.value; }).filter(function (v) { return v !== '__new__'; });
+    if (value && known.indexOf(value) === -1) {
+      select.value = '__new__'; custom.value = value; custom.classList.remove('hidden');
+    } else {
+      select.value = value || ''; custom.value = ''; custom.classList.add('hidden');
+    }
+  }
+
+  function getSelectOrCustomValue(selectId, customId) {
+    const select = document.getElementById(selectId);
+    if (select.value === '__new__') return document.getElementById(customId).value.trim();
+    return select.value;
+  }
+
+  function showToast(msg, isError) {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.className = 'toast' + (isError ? ' error' : '');
+    toast.classList.remove('hidden');
+    setTimeout(function () { toast.classList.add('hidden'); }, 2500);
+  }
+
+  function showError(err) {
+    console.error(err);
+    showToast('เกิดข้อผิดพลาด: ' + (err.message || err), true);
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+</script>

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+<head>
+  // Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyD7M0tvKfTdK0IlW9Ls7De9n3tBRLLpbDk",
+  authDomain: "crm-insurance-db.firebaseapp.com",
+  projectId: "crm-insurance-db",
+  storageBucket: "crm-insurance-db.firebasestorage.app",
+  messagingSenderId: "1005898779370",
+  appId: "1:1005898779370:web:e1f105b35e9253d610e593",
+  measurementId: "G-26ZSTL3SNY"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">สมุดทะเบียนลูกค้า</div>
+        <div class="brand-sub">CRM ตัวแทนประกัน</div>
+      </div>
+      <nav class="navlist">
+        <div class="navlink active" data-view="home"><span class="navnum">01</span> หน้าแรก</div>
+        <div class="navlink" data-view="customers"><span class="navnum">02</span> ลูกค้า</div>
+        <div class="navlink" data-view="deals"><span class="navnum">03</span> ดีล</div>
+      </nav>
+      <div class="sidebar-foot">ข้อมูลถูกบันทึกลง Google Sheet โดยอัตโนมัติ</div>
+    </aside>
+
+    <main class="main">
+      <div class="page-head">
+        <div>
+          <h1 id="pageTitle">หน้าแรก</h1>
+          <p class="desc" id="pageDesc">สรุปงานประจำวันของตัวแทน</p>
+        </div>
+        <div class="head-actions" id="headActions"></div>
+      </div>
+
+      <div id="loading" class="loading">กำลังโหลดข้อมูล...</div>
+
+      <!-- ===== หน้าแรก ===== -->
+      <section class="view" data-view-panel="home">
+        <div class="home-grid">
+          <div>
+            <div class="panel" style="margin-bottom:20px;">
+              <div class="panel-title-row">
+                <div class="panel-title">นัดหมาย</div>
+                <button class="btn-mini-add" id="btnAddFollowUp">+ นัดหมาย</button>
+              </div>
+              <div class="panel-sub">นัดหมายวันนี้ ที่เลยกำหนด และล่วงหน้า 7 วัน</div>
+              <ul class="list-simple" id="followUpList"></ul>
+            </div>
+            <div class="panel">
+              <div class="panel-title">แจ้งเตือนถึงกำหนดชำระเบี้ย</div>
+              <div class="panel-sub">เบี้ยประกันทุกประเภทที่ถึงกำหนดชำระภายใน 30 วัน</div>
+              <div id="premiumDueList"></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-title">เป้าหมายยอดขายเดือนนี้</div>
+            <div class="panel-sub">เทียบยอดดีลที่ปิดการขายแล้วในเดือนปัจจุบัน</div>
+            <div class="target-progress-wrap">
+              <div class="target-numbers">
+                <span class="achieved" id="targetAchieved">฿ 0</span>
+                <span class="of-target" id="targetOf">จากเป้า ฿ 0</span>
+              </div>
+              <div class="progress-track"><div class="progress-fill" id="targetFill" style="width:0%"></div></div>
+              <div class="target-meta">
+                <span id="targetDealCount">ปิดแล้ว 0 ดีล</span>
+                <span class="target-edit-link" id="btnEditTarget">ตั้งเป้าหมาย</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== ลูกค้า: รายชื่อ ===== -->
+      <section class="view" data-view-panel="customers">
+        <div class="table-scroll">
+          <table class="ledger-table">
+            <thead>
+              <tr>
+                <th>ชื่อ-นามสกุลผู้เอาประกัน</th>
+                <th>
+                  <div class="th-with-sort family-filter-wrap" id="familyFilterWrap">
+                    <span>ชื่อครอบครัว</span>
+                    <button type="button" class="th-sort-btn" id="btnFamilyFilter" title="เลือกดูเฉพาะครอบครัวใดครอบครัวหนึ่ง">
+                      <span id="familyFilterLabel">ทั้งหมด</span><span class="th-sort-arrow">▾</span>
+                    </button>
+                    <div class="family-filter-menu hidden" id="familyFilterMenu"></div>
+                  </div>
+                </th>
+                <th>เบอร์โทรศัพท์</th>
+                <th>อีเมล</th>
+              </tr>
+            </thead>
+            <tbody id="customerLedgerBody"></tbody>
+          </table>
+        </div>
+        <div id="customerEmpty" class="empty-note hidden">ยังไม่มีข้อมูลลูกค้า กดปุ่ม "เพิ่มลูกค้าใหม่" เพื่อเริ่มต้น</div>
+      </section>
+
+      <!-- ===== ลูกค้า: แฟ้มข้อมูล (รายคน) ===== -->
+      <section class="view" data-view-panel="customerDetail">
+        <div class="back-link" id="backToCustomers">← กลับไปหน้ารายชื่อลูกค้า</div>
+        <div class="customer-header">
+          <div>
+            <h2 id="cdName">—</h2>
+            <div class="sub" id="cdSub">—</div>
+          </div>
+          <div class="head-actions">
+            <button class="btn-secondary" id="btnEditCustomer">แก้ไขข้อมูลส่วนตัว</button>
+            <button class="btn-danger" id="btnDeleteCustomer">ลบลูกค้า</button>
+          </div>
+        </div>
+
+        <div class="tabs" id="customerTabs">
+          <div class="tab-btn active" data-tab="info">ข้อมูลส่วนตัว</div>
+          <div class="tab-btn" data-tab="life">ชีวิต/สุขภาพ/โรคร้ายแรง <span class="tab-count" id="tabCount-life">0</span></div>
+          <div class="tab-btn" data-tab="car">ประกันรถยนต์ <span class="tab-count" id="tabCount-car">0</span></div>
+          <div class="tab-btn" data-tab="fire">ประกันอัคคีภัยบ้าน <span class="tab-count" id="tabCount-fire">0</span></div>
+          <div class="tab-btn" data-tab="travel">ประกันเดินทาง</div>
+          <div class="tab-btn" data-tab="other">สินค้าอื่นๆ</div>
+          <div class="tab-btn" data-tab="service">บริการหลังการขาย</div>
+        </div>
+
+        <div class="tab-panel active" data-tab-panel="info">
+          <div class="info-grid" id="cdInfoGrid"></div>
+          <div>
+            <div class="ledger-section-title">Remark</div>
+            <div class="remark-box" id="cdRemark">—</div>
+          </div>
+        </div>
+
+        <div class="tab-panel" data-tab-panel="life">
+          <div class="mini-toolbar"><button class="btn-primary btn-add-record" data-category="life">+ เพิ่มกรมธรรม์</button></div>
+          <div class="table-scroll"><table class="mini-table" id="tbl-life"><thead></thead><tbody></tbody></table></div>
+        </div>
+
+        <div class="tab-panel" data-tab-panel="car">
+          <div class="mini-toolbar"><button class="btn-primary btn-add-record" data-category="car">+ เพิ่มประกันรถยนต์</button></div>
+          <div class="table-scroll"><table class="mini-table" id="tbl-car"><thead></thead><tbody></tbody></table></div>
+        </div>
+
+        <div class="tab-panel" data-tab-panel="fire">
+          <div class="mini-toolbar"><button class="btn-primary btn-add-record" data-category="fire">+ เพิ่มประกันอัคคีภัย</button></div>
+          <div class="table-scroll"><table class="mini-table" id="tbl-fire"><thead></thead><tbody></tbody></table></div>
+        </div>
+
+        <div class="tab-panel" data-tab-panel="travel">
+          <div class="mini-toolbar"><button class="btn-primary btn-add-record" data-category="travel">+ เพิ่มประกันเดินทาง</button></div>
+          <div class="table-scroll"><table class="mini-table" id="tbl-travel"><thead></thead><tbody></tbody></table></div>
+        </div>
+
+        <div class="tab-panel" data-tab-panel="other">
+          <div class="mini-toolbar"><button class="btn-primary btn-add-record" data-category="other">+ เพิ่มสินค้าอื่นๆ</button></div>
+          <div class="table-scroll"><table class="mini-table" id="tbl-other"><thead></thead><tbody></tbody></table></div>
+        </div>
+
+        <div class="tab-panel" data-tab-panel="service">
+          <div class="mini-toolbar"><button class="btn-primary" id="btnAddService">+ เพิ่มบันทึกบริการ</button></div>
+          <div class="table-scroll"><table class="mini-table" id="tbl-service"><thead></thead><tbody></tbody></table></div>
+        </div>
+      </section>
+
+      <!-- ===== ดีล: บอร์ด ===== -->
+      <section class="view" data-view-panel="deals">
+        <div id="board" class="board"></div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal: ลูกค้า -->
+  <div id="customerModalOverlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="customerModalTitle">เพิ่มลูกค้าใหม่</h2>
+      <form id="customerForm">
+        <input type="hidden" id="custId">
+        <div class="field-grid-2">
+          <label>ชื่อครอบครัว
+            <input type="text" id="custFamilyName">
+          </label>
+          <label>ชื่อ-นามสกุลผู้เอาประกัน *
+            <input type="text" id="custFullName" required>
+          </label>
+        </div>
+        <label>วันเดือนปีเกิด
+          <input type="date" id="custBirthDate">
+        </label>
+        <label>ที่อยู่
+          <textarea id="custAddress" rows="2"></textarea>
+        </label>
+        <div class="field-grid-2">
+          <label>เบอร์โทรศัพท์
+            <input type="text" id="custPhone">
+          </label>
+          <label>อีเมล
+            <input type="email" id="custEmail">
+          </label>
+        </div>
+        <label>Remark
+          <textarea id="custRemark" rows="2" placeholder="ระบุ..."></textarea>
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="custBtnDelete" class="btn-danger hidden">ลบลูกค้า</button>
+          <div class="spacer"></div>
+          <button type="button" id="custBtnCancel" class="btn-secondary">ยกเลิก</button>
+          <button type="submit" class="btn-primary" id="custBtnSave">บันทึก</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: กรมธรรม์/สินค้าอื่นๆ (ฟิลด์สร้างแบบไดนามิกตามหมวด) -->
+  <div id="recordModalOverlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="recordModalTitle">เพิ่มข้อมูล</h2>
+      <form id="recordForm">
+        <input type="hidden" id="recCategory">
+        <input type="hidden" id="recId">
+        <div id="recordFields"></div>
+        <div class="modal-actions">
+          <button type="button" id="recBtnDelete" class="btn-danger hidden">ลบรายการ</button>
+          <div class="spacer"></div>
+          <button type="button" id="recBtnCancel" class="btn-secondary">ยกเลิก</button>
+          <button type="submit" class="btn-primary">บันทึก</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: บริการหลังการขาย -->
+  <div id="serviceModalOverlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="serviceModalTitle">เพิ่มบันทึกบริการหลังการขาย</h2>
+      <form id="serviceForm">
+        <input type="hidden" id="svcId">
+        <label>วันที่
+          <input type="date" id="svcDate">
+        </label>
+        <label>ประเภท
+          <select id="svcType">
+            <option value="เคลม">เคลม</option>
+            <option value="เปลี่ยนแปลง">เปลี่ยนแปลง</option>
+            <option value="เยี่ยมเยียน">เยี่ยมเยียน</option>
+            <option value="อื่นๆ">อื่นๆ</option>
+          </select>
+        </label>
+        <label>รายละเอียด
+          <textarea id="svcDetail" rows="3" placeholder="ระบุ..."></textarea>
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="svcBtnDelete" class="btn-danger hidden">ลบรายการนี้</button>
+          <div class="spacer"></div>
+          <button type="button" id="svcBtnCancel" class="btn-secondary">ยกเลิก</button>
+          <button type="submit" class="btn-primary">บันทึก</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: ดีล -->
+  <div id="dealModalOverlay" class="modal-overlay hidden">
+    <div class="modal modal-wide">
+      <h2 id="dealModalTitle">เพิ่มดีลใหม่</h2>
+      <ul class="stage-timeline hidden" id="dealTimeline"></ul>
+
+      <form id="dealForm">
+        <input type="hidden" id="dealId">
+        <label>ลูกค้า *
+          <select id="dealCustomer" required></select>
+        </label>
+        <div class="field-grid-2">
+          <label>ผลิตภัณฑ์
+            <select id="dealProduct"></select>
+            <input type="text" id="dealProductCustom" class="hidden" placeholder="พิมพ์ชื่อผลิตภัณฑ์ใหม่">
+          </label>
+          <label>มูลค่าดีล (บาท)
+            <input type="number" id="dealValue" step="0.01" min="0">
+          </label>
+        </div>
+        <label id="dealDateLabel">วันที่ (ดีลใหม่)
+          <input type="date" id="dealDate">
+        </label>
+        <label>รายละเอียด
+          <textarea id="dealDetailText" rows="3" placeholder="พิมพ์รายละเอียดเกี่ยวกับดีลนี้..."></textarea>
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="dealBtnDelete" class="btn-danger hidden">ลบดีลนี้</button>
+          <div class="spacer"></div>
+          <button type="button" id="dealBtnCancel" class="btn-secondary">ยกเลิก</button>
+          <button type="submit" class="btn-primary">บันทึก</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: นัดหมาย (ไม่ผูกกับดีล) -->
+  <div id="appointmentModalOverlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2 id="appointmentModalTitle">เพิ่มนัดหมาย</h2>
+      <form id="appointmentForm">
+        <input type="hidden" id="apptId">
+        <label>ลูกค้า (ถ้ามี)
+          <select id="apptCustomer"></select>
+        </label>
+        <label>วันนัดหมาย *
+          <input type="date" id="apptDate" required>
+        </label>
+        <label>รายละเอียด/หมายเหตุ
+          <textarea id="apptNote" rows="3" placeholder="เช่น โทรติดตามผล"></textarea>
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="apptBtnDelete" class="btn-danger hidden">ลบนัดหมายนี้</button>
+          <div class="spacer"></div>
+          <button type="button" id="apptBtnCancel" class="btn-secondary">ยกเลิก</button>
+          <button type="submit" class="btn-primary">บันทึก</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: ตั้งเป้าหมายยอดขาย -->
+  <div id="targetModalOverlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>ตั้งเป้าหมายยอดขายรายเดือน</h2>
+      <form id="targetForm">
+        <label>เป้าหมาย (บาท/เดือน)
+          <input type="number" id="targetInput" step="0.01" min="0">
+        </label>
+        <div class="modal-actions">
+          <div class="spacer"></div>
+          <button type="button" id="targetBtnCancel" class="btn-secondary">ยกเลิก</button>
+          <button type="submit" class="btn-primary">บันทึก</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <?!= include('JavaScript'); ?>
+</body>
+</html>
